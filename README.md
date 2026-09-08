@@ -1,108 +1,94 @@
 # FactLens
 
-Cross-document fact reconciliation engine. Feed it multiple PDFs, it extracts typed claims, grounds each one back to the source text, and classifies relationships between documents: corroborates, contradicts, temporally distinct, scope mismatch, or uncertain.
+Cross-document fact reconciliation engine. Give it multiple PDFs, it extracts structured claims from each one, grounds every claim back to the source text, and tells you how documents relate: corroborates, contradicts, temporally distinct, scope mismatch, or uncertain.
 
-## Why it exists
+---
 
-Most document intelligence tools stop at extraction and search. The harder problem is: when two documents make different numerical claims about the same thing, which one is right? Are they actually contradicting each other, or are they just reporting different time periods?
+## Setup and Run Instructions
 
-FactLens answers that question with a deterministic pipeline. No magic, no vibes.
-
-## How it works
-
-```
-PDF
- -> layout-aware chunking (PyMuPDF)
- -> schema-constrained LLM extraction (subject / predicate / value / temporal scope / geo scope)
- -> evidence grounding validation   <-- hallucinations caught here, before DB write
- -> numeric + temporal normalization ($4.2B -> 4,200,000,000 USD | FY2024 -> {year: 2024})
- -> deterministic comparison engine (scope check -> unit check -> numeric check)
- -> LLM refinement only for cases the deterministic engine can't decide
- -> 10-step reasoning trace stored per reconciliation
-```
-
-The grounding step is the one that matters most. Every extracted fact must have a character-overlap match against the original chunk text. If it fails, the fact goes to the Uncertainty Register, not the trash. You can inspect every rejection and understand why.
-
-## Stack
-
-| Layer | What |
-|---|---|
-| PDF parsing | PyMuPDF |
-| Extraction | Gemini (default), OpenAI, or Mock |
-| Embeddings | all-MiniLM-L6-v2, runs locally |
-| Vector store | PostgreSQL + pgvector |
-| Backend | FastAPI, SQLAlchemy async |
-| Frontend | React 18, TypeScript, Vite |
-
-No hosted embedding API. No per-query cost. The model is behind an interface, swap it with one line in `.env`.
-
-## Running
+**Requirements:** Docker and Docker Compose installed.
 
 ```bash
+git clone https://github.com/mihir-dixit2k27/factlens.git
+cd factlens
 cp .env.example .env
-# set GEMINI_API_KEY in .env
+```
+
+Open `.env` and set your Gemini API key:
+
+```
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=your_key_here
+```
+
+Then start everything:
+
+```bash
 docker compose up --build -d
 ```
 
-UI at `localhost:5173`, API docs at `localhost:8000/docs`.
+- UI: http://localhost:5173
+- API docs: http://localhost:8000/docs
+- Postgres: localhost:5433
 
-For local dev without Docker:
+To process documents: go to the Documents page, upload one or more PDFs, and click Process on each one. Facts and reconciliation results appear under the Facts and Reconciliation pages once the pipeline finishes.
 
-```bash
-# backend
-cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+---
 
-# frontend (separate terminal)
-cd frontend
-npm install && npm run dev
-```
+## Video Demo
 
-## Config
+https://www.loom.com/share/ab2d13051ea2416eb2d7af1f69730783
 
-```bash
-LLM_PROVIDER=gemini        # gemini | openai | mock
-GEMINI_API_KEY=...
-DATABASE_URL=postgresql://factlens:factlens@localhost:5432/factlens
-EMBEDDING_MODEL=all-MiniLM-L6-v2
-```
+The video covers: uploading PDFs, watching the processing pipeline, reviewing extracted facts with confidence scores, and walking through the reconciliation workspace including a contradiction and a temporal distinction case.
 
-Only the key for the active provider is required at startup.
+---
 
-## Tests
+## Approach
 
-```bash
-cd backend && pytest tests/ -v
-```
+The core problem is not extraction, it is comparison. Two documents can report different numbers for the same thing, and the system needs to say whether that is a contradiction, a time period difference, a scope difference, or something else entirely.
 
-36 tests: numeric normalization, temporal parsing, contradiction engine, evidence grounding validator.
+The pipeline works in stages:
 
-## Project layout
+1. **Ingest** -- layout-aware PDF parsing with PyMuPDF, adaptive chunking
+2. **Extract** -- Gemini returns structured facts (subject, predicate, value, temporal scope, geographic scope, object type) as free-form JSON parsed against a Pydantic schema
+3. **Ground** -- every fact must have a character-overlap match against the original chunk text before it is persisted; hallucinated spans are caught here and logged to the Uncertainty Register
+4. **Normalize** -- numeric values, currencies, units, and time periods are reduced to comparable forms (`$4.2B` becomes `4200000000 USD`, `FY2024` becomes `{year: 2024}`)
+5. **Reconcile** -- a deterministic engine runs scope, unit, and numeric checks first; LLM is only invoked when the rules cannot decide
+6. **Store** -- a 10-step reasoning trace is saved per reconciliation result
 
-```
-factlens/
-  backend/
-    app/
-      api/            route handlers
-      core/           config, logging
-      db/             models, session
-      extraction/     LLM provider abstraction + evidence validator
-      normalization/  numeric, temporal, unit parsers
-      reconciliation/ deterministic engine + reasoning trace
-      retrieval/      hybrid vector + FTS search
-    tests/
-  frontend/
-    src/
-      pages/          8 views
-      api/            typed API client
-```
+Embeddings use `all-MiniLM-L6-v2` running locally (no API cost). Vectors are stored in PostgreSQL via pgvector. The LLM provider is behind a Protocol interface so Gemini, OpenAI, or a local model can be swapped without touching pipeline code.
 
-## Design decisions
+Key trade-offs:
+- Deterministic engine before LLM keeps latency low and results auditable
+- Evidence grounding validation before DB write means zero hallucinated facts in the output (they go to Uncertainty instead)
+- Local embeddings eliminate per-query cost at the price of cold-start time on first run
 
-**Deterministic engine before LLM.** Scope mismatches (wrong year, different region, different unit) are detectable with zero inference cost. LLM gets invoked only when the rules genuinely can't decide.
+AI tools used: Gemini for structured fact extraction and relationship classification.
 
-**Evidence grounding before persistence.** The extraction LLM sometimes invents text spans. The validator runs a character-overlap check against the original chunk. Failed groundings are logged and inspectable, not silently dropped.
+---
 
-**Local embeddings.** `all-MiniLM-L6-v2` runs CPU-only, costs nothing, and is abstracted behind a protocol. Swapping it out does not touch any pipeline code.
+## Limitations and Next Steps
+
+**What does not work yet:**
+
+- The reconciliation engine compares facts within the same predicate group; cross-predicate relationships (e.g. linking revenue to market cap) are not detected
+- Entity resolution uses token-overlap fuzzy matching, which can miss abbreviations or acronyms that do not share tokens
+- The frontend does not yet support side-by-side document page viewing; evidence navigation goes to the fact panel but not the raw PDF page
+- Processing is single-threaded per document; large PDFs (50+ pages) will be slow
+
+**Would build next:**
+
+- Cross-predicate relationship linking using embedding similarity
+- Named entity resolution using a model instead of string matching
+- Streaming pipeline status via WebSocket so the UI updates in real time
+- A re-processing API endpoint that does not require a DB stage reset to force re-extraction
+
+---
+
+## Additional Notes
+
+The project does not hard-code any domain, entity, or document structure. It generalizes to arbitrary PDFs.
+
+The Uncertainty Register (Failures page in the UI) is intentional design, not a debug view. Every grounding failure is stored with its rejection reason and is inspectable. This is important for the evaluation use case because it makes the system's confidence calibration visible.
+
+The `.env.example` file shows all required variables. No credentials are committed to the repository.

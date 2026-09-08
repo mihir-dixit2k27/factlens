@@ -2,9 +2,9 @@ import { useEffect, useState, useRef } from 'react';
 import { listDocuments, uploadDocument, triggerProcessing } from '../api/client';
 import type { Document } from '../types';
 
-const STAGE_ORDER = ['PENDING', 'EXTRACTING', 'CHUNKING', 'EXTRACTING_FACTS', 'NORMALIZING', 'EMBEDDING', 'RECONCILING', 'COMPLETE', 'FAILED'];
+const STAGE_ORDER = ['READY', 'EXTRACTING', 'CHUNKING', 'EXTRACTING_FACTS', 'NORMALIZING', 'EMBEDDING', 'RECONCILING', 'COMPLETE', 'FAILED'];
 const STAGE_LABEL: Record<string, string> = {
-    PENDING: 'Pending', EXTRACTING: 'Ingest', CHUNKING: 'Segment',
+    READY: 'Ready', PENDING: 'Pending', EXTRACTING: 'Ingest', CHUNKING: 'Segment',
     EXTRACTING_FACTS: 'Fact Discovery', NORMALIZING: 'Normalize',
     EMBEDDING: 'Embed', RECONCILING: 'Reconcile',
     COMPLETE: 'Complete', FAILED: 'Failed',
@@ -18,14 +18,17 @@ function PipelineBar({ doc }: { doc: Document }) {
             {stages.map((s, i) => (
                 <div key={s} style={{
                     flex: 1, height: '100%',
-                    background: i < doneIdx ? 'var(--green)' :
-                        i === doneIdx && doc.processing_stage !== 'FAILED' ? 'var(--accent)' :
-                            doc.processing_stage === 'FAILED' && i <= doneIdx ? 'var(--red)' : 'var(--rule)',
+                    background:
+                        doc.processing_stage === 'FAILED' && i <= doneIdx ? 'var(--red)' :
+                            i < doneIdx ? 'var(--green)' :
+                                i === doneIdx ? 'var(--accent)' : 'var(--rule)',
                 }} />
             ))}
         </div>
     );
 }
+
+const isUnprocessed = (stage: string) => stage === 'READY' || stage === 'PENDING' || stage === 'UPLOADED';
 
 export default function Documents() {
     const [docs, setDocs] = useState<Document[]>([]);
@@ -43,7 +46,7 @@ export default function Documents() {
 
     useEffect(() => {
         load();
-        const iv = setInterval(load, 8000);
+        const iv = setInterval(load, 5000);
         return () => clearInterval(iv);
     }, []);
 
@@ -79,7 +82,6 @@ export default function Documents() {
             </div>
 
             <div className="page-body">
-                {/* Upload zone */}
                 <div
                     className={`upload-zone${dragOver ? ' active' : ''}`}
                     onDragOver={e => { e.preventDefault(); setDragOver(true); }}
@@ -94,7 +96,6 @@ export default function Documents() {
                 </div>
                 <input ref={fileRef} type="file" accept=".pdf" multiple hidden onChange={e => upload(e.target.files)} />
 
-                {/* Document table */}
                 <div style={{ marginTop: 'var(--s6)' }}>
                     {docs.length === 0 ? (
                         <div className="empty-state">
@@ -128,20 +129,22 @@ export default function Documents() {
                                                 {d.file_size_bytes ? `${(d.file_size_bytes / 1024).toFixed(0)} KB` : '—'}
                                             </td>
                                             <td>
-                                                <span className={`tag ${d.processing_stage === 'COMPLETE' ? 'tag-ready' : d.processing_stage === 'FAILED' ? 'tag-failed' : d.processing_stage === 'PENDING' ? 'tag-uncertain' : 'tag-processing'}`}>
+                                                <span className={`tag ${d.processing_stage === 'COMPLETE' ? 'tag-ready' :
+                                                        d.processing_stage === 'FAILED' ? 'tag-failed' :
+                                                            isUnprocessed(d.processing_stage) ? 'tag-uncertain' :
+                                                                'tag-processing'
+                                                    }`}>
                                                     {STAGE_LABEL[d.processing_stage] || d.processing_stage}
                                                 </span>
                                             </td>
                                             <td style={{ width: 120 }}>
-                                                <div style={{ marginBottom: 3 }}>
-                                                    <PipelineBar doc={d} />
-                                                </div>
+                                                <div style={{ marginBottom: 3 }}><PipelineBar doc={d} /></div>
                                                 <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.6rem', color: 'var(--ink-4)' }}>
-                                                    {d.processing_stage === 'COMPLETE' ? '100%' : d.processing_stage === 'FAILED' ? 'failed' : '…'}
+                                                    {d.processing_stage === 'COMPLETE' ? '100%' : d.processing_stage === 'FAILED' ? 'failed' : isUnprocessed(d.processing_stage) ? 'queued' : '…'}
                                                 </div>
                                             </td>
                                             <td>
-                                                {d.processing_stage === 'PENDING' && (
+                                                {isUnprocessed(d.processing_stage) && (
                                                     <button className="btn btn-ghost" style={{ fontSize: '0.72rem', padding: '3px 10px' }}
                                                         onClick={() => process(d.id)} disabled={processing === d.id}>
                                                         {processing === d.id ? 'Processing…' : 'Process'}
@@ -155,6 +158,9 @@ export default function Documents() {
                                                 )}
                                                 {d.processing_stage === 'COMPLETE' && (
                                                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--green)' }}>✓</span>
+                                                )}
+                                                {!isUnprocessed(d.processing_stage) && d.processing_stage !== 'FAILED' && d.processing_stage !== 'COMPLETE' && (
+                                                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--accent)' }}>running</span>
                                                 )}
                                             </td>
                                         </tr>

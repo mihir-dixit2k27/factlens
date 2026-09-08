@@ -180,16 +180,15 @@ class GeminiProvider:
             raise ValueError("GEMINI_API_KEY is not set. Set it in .env or environment.")
         genai.configure(api_key=settings.gemini_api_key)
         self._genai = genai
-        self._model_name = "gemini-1.5-flash"
+        self._model_name = "gemini-2.0-flash"
         logger.info("gemini_provider_initialized", model=self._model_name)
 
-    def _make_model(self, response_schema: Any) -> Any:
+    def _make_model(self, temperature: float = 0.1) -> Any:
         return self._genai.GenerativeModel(
             model_name=self._model_name,
             generation_config=self._genai.GenerationConfig(
                 response_mime_type="application/json",
-                response_schema=response_schema,
-                temperature=0.1,
+                temperature=temperature,
                 max_output_tokens=8192,
             ),
         )
@@ -204,16 +203,30 @@ class GeminiProvider:
             f"{EXTRACTION_SYSTEM_PROMPT}\n\n"
             f"Document context: {document_context}\n\n"
             f"Text to extract from:\n---\n{chunk_text}\n---\n\n"
-            "Return a JSON object with a 'facts' array and 'extraction_notes' string."
+            "Return ONLY valid JSON with this exact structure:\n"
+            '{"facts": [{"subject": "", "predicate": "", "object_text": "", '
+            '"object_type": "NUMERIC|PERCENTAGE|MONETARY|COUNT|DATE|TEXT", '
+            '"numeric_value": null, "unit": null, "currency": null, '
+            '"temporal_scope": null, "geographic_scope": null, '
+            '"population_scope": null, "methodology": null, "modality": null, '
+            '"qualifiers": null, "confidence": 0.9, "uncertainty_reasons": [], '
+            '"evidence_span": "exact quote from text"}], '
+            '"extraction_notes": ""}'
         )
         try:
-            model = self._make_model(ExtractionResponse)
+            model = self._make_model(temperature=0.1)
             response = await asyncio.to_thread(model.generate_content, prompt)
             elapsed = time.perf_counter() - t0
             llm_request_duration_seconds.labels(
                 provider="gemini", operation="extract_facts"
             ).observe(elapsed)
-            raw = json.loads(response.text)
+            text = response.text.strip()
+            # Strip markdown code fences if present
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
+            raw = json.loads(text)
+            if "facts" not in raw:
+                raw = {"facts": [], "extraction_notes": "No facts key in response"}
             return ExtractionResponse(**raw)
         except Exception as exc:
             logger.error("gemini_extract_facts_error", error=str(exc))
@@ -239,16 +252,24 @@ class GeminiProvider:
             f"{RELATIONSHIP_SYSTEM_PROMPT}\n\n"
             f"Fact A: {fact_a_text}\nEvidence A: {evidence_a}\n\n"
             f"Fact B: {fact_b_text}\nEvidence B: {evidence_b}\n{hint_str}\n\n"
-            "Classify the relationship. Return structured JSON."
+            "Return ONLY valid JSON with this exact structure:\n"
+            '{"relationship_type": "CORROBORATES|CONTRADICTS|APPARENT_CONTRADICTION|'
+            'DISTINCT_SCOPE|TEMPORALLY_DISTINCT|UNIT_MISMATCH|UNCERTAIN", '
+            '"confidence": 0.9, "reasoning": "step-by-step reasoning", '
+            '"context_explanation": "plain language explanation", '
+            '"context_factors": []}'
         )
         try:
-            model = self._make_model(RelationshipClassificationRaw)
+            model = self._make_model(temperature=0.1)
             response = await asyncio.to_thread(model.generate_content, prompt)
             elapsed = time.perf_counter() - t0
             llm_request_duration_seconds.labels(
                 provider="gemini", operation="classify_relationship"
             ).observe(elapsed)
-            raw = json.loads(response.text)
+            text = response.text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
+            raw = json.loads(text)
             return RelationshipClassificationRaw(**raw)
         except Exception as exc:
             logger.error("gemini_classify_relationship_error", error=str(exc))

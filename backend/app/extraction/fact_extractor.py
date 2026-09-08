@@ -58,27 +58,34 @@ async def _get_or_create_entity(
     entity_type: str,
     resolver: EntityResolver,
 ) -> Optional[Entity]:
-    """Resolve entity name and upsert into DB."""
-    from sqlalchemy import select
+    """Resolve entity name and upsert into DB. Safe against duplicate inserts."""
+    from sqlalchemy import select, text
+    from sqlalchemy.exc import IntegrityError
 
     resolved = resolver.resolve(canonical_name, entity_type)
     stmt = select(Entity).where(Entity.canonical_name == resolved.canonical_name)
     result = await session.execute(stmt)
     existing = result.scalar_one_or_none()
     if existing:
-        # Merge aliases
         all_aliases = list(set((existing.aliases or []) + resolved.aliases))
         existing.aliases = all_aliases
         return existing
-    else:
-        entity = Entity(
-            canonical_name=resolved.canonical_name,
-            entity_type=entity_type,
-            aliases=resolved.aliases,
-        )
-        session.add(entity)
-        await session.flush()
+
+    try:
+        # Use a nested savepoint so an IntegrityError rolls back only this insert
+        async with session.begin_nested():
+            entity = Entity(
+                canonical_name=resolved.canonical_name,
+                entity_type=entity_type,
+                aliases=resolved.aliases,
+            )
+            session.add(entity)
         return entity
+    except IntegrityError:
+        # Another concurrent chunk already inserted this entity — just fetch it
+        await session.rollback()
+        result2 = await session.execute(stmt)
+        return result2.scalar_one_or_none()
 
 
 async def extract_and_store_facts(

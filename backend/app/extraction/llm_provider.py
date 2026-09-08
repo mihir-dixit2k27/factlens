@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, Union, runtime_checkable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -55,7 +55,7 @@ class ExtractedFactRaw(BaseModel):
         None,
         description="One of: stated, estimated, approximately, projected, audited, unaudited, reported",
     )
-    qualifiers: Optional[dict] = Field(None, description="Any other qualifiers as key-value pairs")
+    qualifiers: Optional[Any] = Field(None, description="Any other qualifiers as key-value pairs")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Extraction confidence 0-1")
     uncertainty_reasons: list[str] = Field(
         default_factory=list,
@@ -65,6 +65,26 @@ class ExtractedFactRaw(BaseModel):
         ...,
         description="The exact sentence or phrase from the input text that supports this fact",
     )
+
+    @field_validator("qualifiers", mode="before")
+    @classmethod
+    def coerce_qualifiers(cls, v: Any) -> Any:
+        """Accept dict or None; coerce strings/lists/other types to None."""
+        if v is None or isinstance(v, dict):
+            return v
+        return None
+
+    @field_validator("uncertainty_reasons", mode="before")
+    @classmethod
+    def coerce_uncertainty_reasons(cls, v: Any) -> Any:
+        """Ensure this is always a list."""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v] if v else []
+        if isinstance(v, list):
+            return v
+        return []
 
 
 class ExtractionResponse(BaseModel):
@@ -180,7 +200,7 @@ class GeminiProvider:
             raise ValueError("GEMINI_API_KEY is not set. Set it in .env or environment.")
         genai.configure(api_key=settings.gemini_api_key)
         self._genai = genai
-        self._model_name = "gemini-2.0-flash"
+        self._model_name = "gemini-3.6-flash"
         logger.info("gemini_provider_initialized", model=self._model_name)
 
     def _make_model(self, temperature: float = 0.1) -> Any:

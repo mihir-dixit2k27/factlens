@@ -1,0 +1,50 @@
+# FactLens Backend Requirements
+
+# --- Web Framework ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+
+# --- Database ---
+sqlalchemy==2.0.35
+alembic==1.13.3
+psycopg2-binary==2.9.10
+asyncpg==0.29.0
+pgvector==0.3.2
+
+# --- Validation & Config ---
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
+
+# --- PDF Processing ---
+pymupdf==1.24.11
+# Optional: docling for complex tables (install separately if needed)
+# docling==2.0.0
+
+# --- LLM Providers ---
+google-generativeai==0.8.3
+openai==1.51.0
+
+# --- Embeddings ---
+sentence-transformers==3.1.1
+numpy==1.26.4
+
+# --- Normalization & NLP ---
+dateparser==1.2.0
+regex==2024.9.11
+
+# --- Metrics & Logging ---
+structlog==24.4.0
+prometheus-client==0.21.0
+
+# --- Testing ---
+pytest==8.3.3
+pytest-asyncio==0.24.0
+pytest-cov==5.0.0
+httpx==0.27.2
+reportlab==4.2.2
+
+# --- Linting & Type Checking ---
+ruff==0.6.9
+mypy==1.11.2

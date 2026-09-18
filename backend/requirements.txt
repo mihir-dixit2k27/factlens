@@ -23,14 +23,13 @@ pymupdf==1.24.11
 # docling==2.0.0
 
 # --- LLM Providers ---
-google-generativeai==0.8.3
-openai==1.51.0
+openai>=1.51.0
 
 # --- LangChain ---
-langchain==0.3.7
-langchain-core==0.3.19
-langchain-google-genai==2.0.7
-langchain-openai==0.2.9
+langchain>=0.3.7
+langchain-core>=0.3.19
+langchain-google-genai>=2.0.7
+langchain-openai>=0.2.9
 
 # --- Embeddings ---
 sentence-transformers==3.1.1

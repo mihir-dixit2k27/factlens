@@ -186,74 +186,68 @@ Instructions:
 
 
 # ---------------------------------------------------------------------------
-# Gemini Provider
+# Gemini Provider (LangChain)
 # ---------------------------------------------------------------------------
 
 
 class GeminiProvider:
-    """Google Gemini with structured JSON output via response_schema."""
+    """Google Gemini via LangChain chains with structured Pydantic output."""
 
     def __init__(self) -> None:
-        import google.generativeai as genai  # type: ignore
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_core.prompts import ChatPromptTemplate
 
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is not set. Set it in .env or environment.")
-        genai.configure(api_key=settings.gemini_api_key)
-        self._genai = genai
-        self._model_name = "gemini-3.6-flash"
-        logger.info("gemini_provider_initialized", model=self._model_name)
 
-    def _make_model(self, temperature: float = 0.1) -> Any:
-        return self._genai.GenerativeModel(
-            model_name=self._model_name,
-            generation_config=self._genai.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=temperature,
-                max_output_tokens=8192,
-            ),
+        self._model_name = "gemini-2.5-flash"
+        self._llm = ChatGoogleGenerativeAI(
+            model=self._model_name,
+            temperature=0.1,
+            google_api_key=settings.gemini_api_key,
+            max_output_tokens=8192,
         )
+        logger.info("gemini_provider_initialized", model=self._model_name, via="langchain")
 
     async def extract_facts(
         self, chunk_text: str, document_context: str = ""
     ) -> ExtractionResponse:
-        import asyncio
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import JsonOutputParser
 
         t0 = time.perf_counter()
-        prompt = (
-            f"{EXTRACTION_SYSTEM_PROMPT}\n\n"
-            f"Document context: {document_context}\n\n"
-            f"Text to extract from:\n---\n{chunk_text}\n---\n\n"
-            "Return ONLY valid JSON with this exact structure:\n"
-            '{"facts": [{"subject": "", "predicate": "", "object_text": "", '
-            '"object_type": "NUMERIC|PERCENTAGE|MONETARY|COUNT|DATE|TEXT", '
-            '"numeric_value": null, "unit": null, "currency": null, '
-            '"temporal_scope": null, "geographic_scope": null, '
-            '"population_scope": null, "methodology": null, "modality": null, '
-            '"qualifiers": null, "confidence": 0.9, "uncertainty_reasons": [], '
-            '"evidence_span": "exact quote from text"}], '
-            '"extraction_notes": ""}'
-        )
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", EXTRACTION_SYSTEM_PROMPT),
+            ("human", (
+                "Document context: {context}\n\n"
+                "Text to extract from:\n---\n{text}\n---\n\n"
+                "Return ONLY valid JSON with this exact structure:\n"
+                '{{"facts": [{{"subject": "", "predicate": "", "object_text": "", '
+                '"object_type": "NUMERIC|PERCENTAGE|MONETARY|COUNT|DATE|TEXT", '
+                '"numeric_value": null, "unit": null, "currency": null, '
+                '"temporal_scope": null, "geographic_scope": null, '
+                '"population_scope": null, "methodology": null, "modality": null, '
+                '"qualifiers": null, "confidence": 0.9, "uncertainty_reasons": [], '
+                '"evidence_span": "exact quote from text"}}], '
+                '"extraction_notes": ""}}'
+            )),
+        ])
+        chain = prompt | self._llm | JsonOutputParser()
         try:
-            model = self._make_model(temperature=0.1)
-            response = await asyncio.to_thread(model.generate_content, prompt)
+            raw = await chain.ainvoke({"context": document_context, "text": chunk_text})
             elapsed = time.perf_counter() - t0
             llm_request_duration_seconds.labels(
                 provider="gemini", operation="extract_facts"
             ).observe(elapsed)
-            text = response.text.strip()
-            # Strip markdown code fences if present
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
-            raw = json.loads(text)
-            if "facts" not in raw:
-                raw = {"facts": [], "extraction_notes": "No facts key in response"}
+            if not isinstance(raw, dict) or "facts" not in raw:
+                raw = {"facts": [], "extraction_notes": "Unexpected response shape"}
             return ExtractionResponse(**raw)
         except Exception as exc:
-            logger.error("gemini_extract_facts_error", error=str(exc))
             elapsed = time.perf_counter() - t0
             llm_request_duration_seconds.labels(
                 provider="gemini", operation="extract_facts"
             ).observe(elapsed)
+            logger.error("gemini_extract_facts_error", error=str(exc))
             return ExtractionResponse(facts=[], extraction_notes=f"Error: {exc}")
 
     async def classify_relationship(
@@ -264,39 +258,44 @@ class GeminiProvider:
         evidence_b: str,
         deterministic_hint: Optional[str] = None,
     ) -> RelationshipClassificationRaw:
-        import asyncio
+        from langchain_core.prompts import ChatPromptTemplate
 
         t0 = time.perf_counter()
-        hint_str = f"\nDeterministic pre-check result: {deterministic_hint}" if deterministic_hint else ""
-        prompt = (
-            f"{RELATIONSHIP_SYSTEM_PROMPT}\n\n"
-            f"Fact A: {fact_a_text}\nEvidence A: {evidence_a}\n\n"
-            f"Fact B: {fact_b_text}\nEvidence B: {evidence_b}\n{hint_str}\n\n"
-            "Return ONLY valid JSON with this exact structure:\n"
-            '{"relationship_type": "CORROBORATES|CONTRADICTS|APPARENT_CONTRADICTION|'
-            'DISTINCT_SCOPE|TEMPORALLY_DISTINCT|UNIT_MISMATCH|UNCERTAIN", '
-            '"confidence": 0.9, "reasoning": "step-by-step reasoning", '
-            '"context_explanation": "plain language explanation", '
-            '"context_factors": []}'
-        )
+        hint_line = f"\nDeterministic pre-check: {deterministic_hint}" if deterministic_hint else ""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", RELATIONSHIP_SYSTEM_PROMPT),
+            ("human", (
+                "Fact A: {fact_a}\nEvidence A: {evidence_a}\n\n"
+                "Fact B: {fact_b}\nEvidence B: {evidence_b}"
+                "{hint}\n\n"
+                "Return ONLY valid JSON:\n"
+                '{{"relationship_type": "CORROBORATES|CONTRADICTS|APPARENT_CONTRADICTION|'
+                'DISTINCT_SCOPE|TEMPORALLY_DISTINCT|UNIT_MISMATCH|UNCERTAIN", '
+                '"confidence": 0.9, "reasoning": "step-by-step reasoning", '
+                '"context_explanation": "plain language explanation", '
+                '"context_factors": []}}'
+            )),
+        ])
+        chain = prompt | self._llm.with_structured_output(RelationshipClassificationRaw)
         try:
-            model = self._make_model(temperature=0.1)
-            response = await asyncio.to_thread(model.generate_content, prompt)
+            result = await chain.ainvoke({
+                "fact_a": fact_a_text,
+                "evidence_a": evidence_a,
+                "fact_b": fact_b_text,
+                "evidence_b": evidence_b,
+                "hint": hint_line,
+            })
             elapsed = time.perf_counter() - t0
             llm_request_duration_seconds.labels(
                 provider="gemini", operation="classify_relationship"
             ).observe(elapsed)
-            text = response.text.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
-            raw = json.loads(text)
-            return RelationshipClassificationRaw(**raw)
+            return result
         except Exception as exc:
-            logger.error("gemini_classify_relationship_error", error=str(exc))
             elapsed = time.perf_counter() - t0
             llm_request_duration_seconds.labels(
                 provider="gemini", operation="classify_relationship"
             ).observe(elapsed)
+            logger.error("gemini_classify_relationship_error", error=str(exc))
             return RelationshipClassificationRaw(
                 relationship_type="UNCERTAIN",
                 confidence=0.3,
@@ -312,22 +311,27 @@ class GeminiProvider:
         relationship_type: str,
         context: str = "",
     ) -> str:
-        import asyncio
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
 
-        prompt = (
-            f"Explain in 2-3 sentences why the following two facts have the "
-            f"relationship '{relationship_type}':\n\n"
-            f"Fact A: {fact_a_text}\nFact B: {fact_b_text}\n"
-            f"Context: {context}\n\n"
-            "Be precise and reference specific contextual factors."
-        )
+        prompt = ChatPromptTemplate.from_messages([
+            ("human", (
+                "Explain in 2-3 sentences why the following two facts have the "
+                "relationship '{rel_type}':\n\n"
+                "Fact A: {fact_a}\nFact B: {fact_b}\n"
+                "Context: {context}\n\n"
+                "Be precise and reference specific contextual factors."
+            )),
+        ])
+        llm_explain = self._llm.bind(temperature=0.2, max_output_tokens=512)
+        chain = prompt | llm_explain | StrOutputParser()
         try:
-            model = self._genai.GenerativeModel(
-                model_name=self._model_name,
-                generation_config=self._genai.GenerationConfig(temperature=0.2, max_output_tokens=512),
-            )
-            response = await asyncio.to_thread(model.generate_content, prompt)
-            return response.text.strip()
+            return await chain.ainvoke({
+                "rel_type": relationship_type,
+                "fact_a": fact_a_text,
+                "fact_b": fact_b_text,
+                "context": context,
+            })
         except Exception as exc:
             logger.error("gemini_explain_error", error=str(exc))
             return f"Explanation unavailable ({exc})"

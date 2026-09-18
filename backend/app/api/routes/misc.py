@@ -10,6 +10,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
+from app.core.logging import get_logger
+
 from app.api.routes.facts import _fact_to_out
 from app.api.routes.relationships import _rel_to_out
 from app.db.models import (
@@ -35,21 +37,61 @@ metrics_router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 health_router = APIRouter(prefix="/api/health", tags=["health"])
 cases_router = APIRouter(prefix="/api/cases", tags=["cases"])
 
+logger = get_logger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Query
 # ---------------------------------------------------------------------------
 
 
+RAG_SYSTEM_PROMPT = """\
+You are a fact analysis assistant for FactLens, an evidence-first document intelligence system.
+
+Answer the question using ONLY the numbered facts below. Each fact was extracted and verified against source documents.
+
+Rules:
+1. Use only the facts provided. Do not invent or infer information not present.
+2. Reference facts by their number, e.g. "According to fact 3..."
+3. If the facts do not contain enough information to answer, say: "The retrieved facts do not contain sufficient information to answer this question."
+4. Be concise and precise. Numerical values should be quoted exactly as given.
+
+Facts:
+{context}
+"""
+
+
+def _format_facts_as_context(ranked: list) -> str:
+    lines = []
+    for i, r in enumerate(ranked, 1):
+        f = r.fact
+        parts = [f"[{i}] {f.predicate}: {f.object_text}"]
+        if f.temporal_scope and f.temporal_scope.get("label"):
+            parts.append(f"(period: {f.temporal_scope['label']})")
+        if f.geographic_scope:
+            parts.append(f"(scope: {f.geographic_scope})")
+        if f.currency:
+            parts.append(f"({f.currency})")
+        parts.append(f"[confidence: {f.confidence:.0%}]")
+        lines.append(" ".join(parts))
+    return "\n".join(lines)
+
+
 @query_router.post("", response_model=QueryResult)
 async def query_facts(request: QueryRequest, db: AsyncSession = Depends(get_db)) -> QueryResult:
     """
-    Natural language fact query using hybrid retrieval.
-    Returns grounded facts and relationships relevant to the query.
+    Natural language fact query using hybrid retrieval and LangChain RAG synthesis.
+    Retrieves grounded facts via pgvector + BM25, then synthesizes an answer with Gemini.
     """
     from app.embeddings.provider import SentenceTransformerProvider
-    from app.ingestion.pipeline import get_embedding_provider, get_llm_provider_singleton
+    from app.ingestion.pipeline import get_embedding_provider
     from app.retrieval.hybrid import hybrid_fact_search
+    from app.core.config import get_settings
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import StrOutputParser
+
+    cfg = get_settings()
 
     try:
         emb_provider = get_embedding_provider()
@@ -64,7 +106,6 @@ async def query_facts(request: QueryRequest, db: AsyncSession = Depends(get_db))
 
     facts = [_fact_to_out(r.fact, None, 0, 0) for r in ranked]
 
-    # Find relationships between top facts
     fact_ids = [f.id for f in facts]
     rel_stmt = select(Relationship).where(
         (Relationship.fact_a_id.in_(fact_ids)) | (Relationship.fact_b_id.in_(fact_ids))
@@ -73,22 +114,38 @@ async def query_facts(request: QueryRequest, db: AsyncSession = Depends(get_db))
     rels_raw = list(rel_result.scalars().all())
     rels = [await _rel_to_out(r, db, include_facts=False) for r in rels_raw]
 
-    # Collect unique document IDs
     source_docs = list({f.primary_document_id for f in facts if f.primary_document_id})
 
-    # Build answer summary
     if not facts:
-        answer = "No relevant facts found for this query."
-        confidence = 0.0
-    else:
-        top = facts[0]
-        answer = (
-            f"Found {len(facts)} relevant facts. "
-            f"Top result: {top.predicate} = {top.object_text}"
-            + (f" ({top.temporal_scope.get('label', '')})" if top.temporal_scope else "")
-            + "."
+        return QueryResult(
+            query=request.query,
+            answer="No relevant facts found for this query. Process more documents first.",
+            relevant_facts=facts,
+            relevant_relationships=rels,
+            source_documents=source_docs,
+            confidence=0.0,
         )
-        confidence = ranked[0].total_score if ranked else 0.5
+
+    context = _format_facts_as_context(ranked)
+    confidence = ranked[0].total_score if ranked else 0.5
+
+    answer = f"Found {len(facts)} relevant facts. Top: {facts[0].predicate} = {facts[0].object_text}"
+    if cfg.gemini_api_key:
+        try:
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", RAG_SYSTEM_PROMPT),
+                ("human", "{query}"),
+            ])
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.5-flash",
+                temperature=0.1,
+                google_api_key=cfg.gemini_api_key,
+            )
+            chain = prompt | llm | StrOutputParser()
+            answer = await chain.ainvoke({"context": context, "query": request.query})
+        except Exception as exc:
+            logger.warning("rag_synthesis_failed", error=str(exc))
+            answer = f"Synthesis unavailable ({exc}). Top fact: {facts[0].predicate} = {facts[0].object_text}"
 
     return QueryResult(
         query=request.query,

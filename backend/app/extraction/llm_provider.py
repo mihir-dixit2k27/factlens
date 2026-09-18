@@ -200,7 +200,7 @@ class GeminiProvider:
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is not set. Set it in .env or environment.")
 
-        self._model_name = "gemini-2.5-flash"
+        self._model_name = "gemini-3.6-flash"
         self._llm = ChatGoogleGenerativeAI(
             model=self._model_name,
             temperature=0.1,
